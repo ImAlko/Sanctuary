@@ -1,0 +1,12 @@
+{
+  "$type": "World",
+  "Id": 4,
+  "Name": "sg_treasure_vault_free",
+  "TileSize": 64,
+  "StartLatitude": 0,
+  "StartLongitude": 0,
+  "EndLatitude": 8,
+  "EndLongitude": 8,
+  "SpawnPosition": [315.50, -42.36, 170.11],
+  "SpawnRotation": [0, 0, 0, 1]
+}
