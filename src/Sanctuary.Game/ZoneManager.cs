@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Microsoft.EntityFrameworkCore;
@@ -21,9 +22,9 @@ public class ZoneManager : IZoneManager
     private readonly ILogger _logger;
     private readonly IResourceManager _resourceManager;
     private readonly IServiceProvider _serviceProvider;
-    private readonly IDbContextFactory<DatabaseContext> _dbContextFactory;
-
     private static int _uniqueId = 1;
+
+    private int NextID() => Interlocked.Increment(ref _uniqueId) - 1;
 
     private readonly ConcurrentDictionary<(int, ulong?), IZone> _zones = new();
 
@@ -36,14 +37,12 @@ public class ZoneManager : IZoneManager
     public ZoneManager(
         ILoggerFactory loggerFactory,
         IResourceManager resourceManager,
-        IServiceProvider serviceProvider,
-        IDbContextFactory<DatabaseContext> dbContextFactory)
+        IServiceProvider serviceProvider)
     {
         _logger = loggerFactory.CreateLogger<ZoneManager>();
 
         _resourceManager = resourceManager;
         _serviceProvider = serviceProvider;
-        _dbContextFactory = dbContextFactory;
     }
 
     public bool Load()
@@ -100,12 +99,15 @@ public class ZoneManager : IZoneManager
 
         zone = new WorldZone(worldZoneDefinition, _serviceProvider)
         {
-            Id = _uniqueId++
+            Id = NextID()
         };
 
-        zone.Start();
+        if (!_zones.TryAdd((zone.DefinitionId, null), zone))
+            return false;
 
-        return _zones.TryAdd((zone.DefinitionId, null), zone);
+        zone.OnStart();
+
+        return true;
     }
 
     public bool TryGetOrCreateZoneInstance(int zoneDefinitionId, ulong? ownerId, [MaybeNullWhen(false)] out IZone zone)
@@ -121,7 +123,7 @@ public class ZoneManager : IZoneManager
             return false;
         }
 
-        storedZone.Start();
+        storedZone.OnStart();
 
         zone = storedZone;
         return true;
@@ -138,14 +140,14 @@ public class ZoneManager : IZoneManager
         {
             WorldZoneDefinition worldZoneDefinition => new WorldZone(worldZoneDefinition, _serviceProvider)
             {
-                Id = _uniqueId++,
+                Id = NextID(),
                 OwnerId = ownerId
             },
             HousingZoneDefinition housingZoneDefinition when ownerId is not null =>
                 TryGetHousingZone(housingZoneDefinition, ownerId.Value, out var housingZone) ? housingZone : null,
             CombatZoneDefinition combatZoneDefinition when ownerId is not null => new CombatZone(combatZoneDefinition, _serviceProvider)
             {
-                Id = _uniqueId++,
+                Id = NextID(),
                 OwnerId = ownerId
             },
             _ => null
@@ -155,67 +157,29 @@ public class ZoneManager : IZoneManager
     public void RemoveZoneInstance(IZone zone)
     {
         var key = (zone.DefinitionId, zone.OwnerId);
-
-        ((ICollection<KeyValuePair<(int, ulong?), IZone>>)_zones).Remove(new(key, zone));
+        _zones.TryRemove(new(key, zone));
     }
 
     private bool TryGetHousingZone(HousingZoneDefinition housingZoneDefinition, ulong ownerId,
         [MaybeNullWhen(false)] out HousingZone zone)
     {
-        zone = null;
+        // TODO: fetch from DB
 
-        using var dbContext = _dbContextFactory.CreateDbContext();
+        // zone = null;
 
-        var dbHouse = dbContext.Houses.SingleOrDefault(house =>
-            house.CharacterId == ownerId && house.ZoneDefinitionId == housingZoneDefinition.Id);
+        // using var dbContext = _dbContextFactory.CreateDbContext();
 
-        if (dbHouse is null)
-            return false;
+        // var dbHouse = dbContext.Houses.SingleOrDefault(house =>
+        //     house.CharacterId == ownerId && house.ZoneDefinitionId == housingZoneDefinition.Id);
+
+        // if (dbHouse is null)
+        //     return false;
 
         zone = new HousingZone(housingZoneDefinition, _serviceProvider)
         {
-            Id = _uniqueId++,
+            Id = NextID(),
             OwnerId = ownerId
         };
-
-        return true;
-    }
-
-    public bool TryGrantHouse(int zoneDefinitionId, ulong ownerId)
-    {
-        if (!_resourceManager.Zones.TryGetValue(zoneDefinitionId, out var zoneDefinition) ||
-            zoneDefinition is not HousingZoneDefinition housingZoneDefinition)
-        {
-            return false;
-        }
-
-        using var dbContext = _dbContextFactory.CreateDbContext();
-
-        var dbHouse = dbContext.Houses.SingleOrDefault(house =>
-            house.CharacterId == ownerId && house.ZoneDefinitionId == housingZoneDefinition.Id);
-
-        if (dbHouse is not null)
-            return true;
-
-        dbHouse = new DbHouse
-        {
-            CharacterId = ownerId,
-            ZoneDefinitionId = housingZoneDefinition.Id
-        };
-
-        dbContext.Houses.Add(dbHouse);
-
-        try
-        {
-            if (dbContext.SaveChanges() <= 0)
-            {
-                _logger.LogWarning("Failed to create house for character {characterId}.", ownerId);
-                return false;
-            }
-        }
-        catch (DbUpdateException)
-        {
-        }
 
         return true;
     }
