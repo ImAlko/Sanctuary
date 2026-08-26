@@ -41,7 +41,8 @@ public abstract class BaseZone : IZone, IDisposable
     private const int VisibleTileRadius = 2;
     private readonly Dictionary<int, ZoneTile> _tiles;
 
-    private static ulong _nextNpcGuid = NpcBaseGuid;
+    private readonly object _npcGuidLock = new();
+    private ulong _nextNpcGuid = NpcBaseGuid;
 
     private readonly ConcurrentDictionary<ulong, Npc> _npcs = new();
     private readonly ConcurrentDictionary<ulong, Player> _players = new();
@@ -1509,6 +1510,21 @@ public abstract class BaseZone : IZone, IDisposable
         }
     }
 
+    private bool TryRegisterEntity<TEntity>(ConcurrentDictionary<ulong, TEntity> collection, TEntity entity)
+        where TEntity : IEntity
+    {
+        if (!collection.TryAdd(entity.Guid, entity))
+            return false;
+
+        if (!_entities.TryAdd(entity.Guid, entity))
+        {
+            collection.TryRemove(entity.Guid, out _);
+            return false;
+        }
+
+        return true;
+    }
+
     public bool TryCreateNpc(ulong? guid, [MaybeNullWhen(false)] out Npc npc)
     {
         npc = new Npc(this)
@@ -1516,7 +1532,13 @@ public abstract class BaseZone : IZone, IDisposable
             Guid = GetNpcGuid(guid)
         };
 
-        return _npcs.TryAdd(npc.Guid, npc) && _entities.TryAdd(npc.Guid, npc);
+        if (!TryRegisterEntity(_npcs, npc))
+        {
+            npc = null;
+            return false;
+        }
+
+        return true;
     }
 
     public bool TryCreateNpc(ulong? guid, NpcDefinition definition, [MaybeNullWhen(false)] out Npc npc)
@@ -1537,7 +1559,7 @@ public abstract class BaseZone : IZone, IDisposable
             Visible = true
         };
 
-        if (!_npcs.TryAdd(npc.Guid, npc) || !_entities.TryAdd(npc.Guid, npc))
+        if (!TryRegisterEntity(_npcs, npc))
         {
             npc = null;
             return false;
@@ -1804,7 +1826,7 @@ public abstract class BaseZone : IZone, IDisposable
     {
         node = new CollectionNode(this, typeDefinition, poolDefinition, spawnDefinition)
         {
-            Guid = _nextNpcGuid++,
+            Guid = GetNpcGuid(null),
             Name = typeDefinition.Name,
             ModelId = typeDefinition.ModelId,
             Scale = typeDefinition.Scale,
@@ -1814,8 +1836,11 @@ public abstract class BaseZone : IZone, IDisposable
             Visible = true
         };
 
-        if (!_npcs.TryAdd(node.Guid, node) || !_entities.TryAdd(node.Guid, node))
+        if (!TryRegisterEntity(_npcs, node))
+        {
+            node = null;
             return false;
+        }
 
         node.UpdatePosition(spawnDefinition.SpawnPosition, spawnDefinition.SpawnRotation);
         return true;
@@ -1873,10 +1898,16 @@ public abstract class BaseZone : IZone, IDisposable
     {
         mount = new Mount(this, rider, definition)
         {
-            Guid = _nextNpcGuid++
+            Guid = GetNpcGuid(null)
         };
 
-        return _npcs.TryAdd(mount.Guid, mount) && _entities.TryAdd(mount.Guid, mount);
+        if (!TryRegisterEntity(_npcs, mount))
+        {
+            mount = null;
+            return false;
+        }
+
+        return true;
     }
 
     public bool TryCreatePlayer(ulong guid, UdpConnection connection, [MaybeNullWhen(false)] out Player player)
@@ -1886,7 +1917,13 @@ public abstract class BaseZone : IZone, IDisposable
             Guid = guid
         };
 
-        return _players.TryAdd(player.Guid, player) && _entities.TryAdd(player.Guid, player);
+        if (!TryRegisterEntity(_players, player))
+        {
+            player = null;
+            return false;
+        }
+
+        return true;
     }
 
     public bool TryRemoveNpc(ulong guid)
@@ -2163,13 +2200,16 @@ public abstract class BaseZone : IZone, IDisposable
 
     private ulong GetNpcGuid(ulong? guid)
     {
-        if (guid.HasValue)
+        lock (_npcGuidLock)
         {
-            _nextNpcGuid = Math.Max(_nextNpcGuid, guid.Value + 1);
-            return guid.Value;
-        }
+            if (guid.HasValue)
+            {
+                _nextNpcGuid = Math.Max(_nextNpcGuid, guid.Value + 1);
+                return guid.Value;
+            }
 
-        return _nextNpcGuid++;
+            return _nextNpcGuid++;
+        }
     }
 
     public void Dispose()
