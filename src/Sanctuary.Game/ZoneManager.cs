@@ -112,47 +112,45 @@ public class ZoneManager : IZoneManager
 
     public bool TryGetOrCreateZoneInstance(int zoneDefinitionId, ulong? ownerId, [MaybeNullWhen(false)] out IZone zone)
     {
-        var key = (zoneDefinitionId, ownerId);
-
-        var storedZone = _zones.GetOrAdd(key, _ => CreateZoneInstance(zoneDefinitionId, ownerId)!);
-
-        if (storedZone is null)
+        if (!_resourceManager.Zones.TryGetValue(zoneDefinitionId, out var zoneDefinition))
         {
-            _zones.TryRemove(key, out _);
             zone = null;
             return false;
         }
 
-        storedZone.OnStart();
+        if (!PlayerCanAccessZone(zoneDefinition, ownerId))
+        {
+            zone = null;
+            return false;
+        }
 
-        zone = storedZone;
+        var key = (zoneDefinitionId, ownerId);
+
+        zone = _zones.GetOrAdd(key, _ => CreateZoneInstance(zoneDefinition, ownerId));
+        zone.OnStart();
+
         return true;
     }
 
-    private IZone? CreateZoneInstance(int zoneDefinitionId, ulong? ownerId)
+    private IZone CreateZoneInstance(BaseZoneDefinition zoneDefinition, ulong? ownerId) => zoneDefinition switch
     {
-        if (!_resourceManager.Zones.TryGetValue(zoneDefinitionId, out var zoneDefinition))
+        WorldZoneDefinition worldZoneDefinition => new WorldZone(worldZoneDefinition, _serviceProvider)
         {
-            return null;
-        }
-
-        return zoneDefinition switch
+            Id = NextID(),
+            OwnerId = ownerId // Note: should always be 'null'.
+        },
+        HousingZoneDefinition housingZoneDefinition => new HousingZone(housingZoneDefinition, _serviceProvider)
         {
-            WorldZoneDefinition worldZoneDefinition => new WorldZone(worldZoneDefinition, _serviceProvider)
-            {
-                Id = NextID(),
-                OwnerId = ownerId
-            },
-            HousingZoneDefinition housingZoneDefinition when ownerId is not null =>
-                TryGetHousingZone(housingZoneDefinition, ownerId.Value, out var housingZone) ? housingZone : null,
-            CombatZoneDefinition combatZoneDefinition when ownerId is not null => new CombatZone(combatZoneDefinition, _serviceProvider)
-            {
-                Id = NextID(),
-                OwnerId = ownerId
-            },
-            _ => null
-        };
-    }
+            Id = NextID(),
+            OwnerId = ownerId
+        },
+        CombatZoneDefinition combatZoneDefinition => new CombatZone(combatZoneDefinition, _serviceProvider)
+        {
+            Id = NextID(),
+            OwnerId = ownerId
+        },
+        _ => throw new InvalidOperationException($"Unhandled zone definition type: {zoneDefinition.GetType()}")
+    };
 
     public void RemoveZoneInstance(IZone zone)
     {
@@ -160,26 +158,43 @@ public class ZoneManager : IZoneManager
         _zones.TryRemove(new(key, zone));
     }
 
-    private bool TryGetHousingZone(HousingZoneDefinition housingZoneDefinition, ulong ownerId,
-        [MaybeNullWhen(false)] out HousingZone zone)
+    public void EvictIfEmpty(IZone zone)
     {
-        // TODO: fetch from DB
+        var isStartingZone = zone.DefinitionId == StartingZoneDefinitionId && zone.OwnerId is null;
 
-        // zone = null;
+        if (isStartingZone)
+            return;
+
+        // NOTE: So the zone instance itself has access to players and its lock
+        // so this will handle the empty check. 
+        // Another option is to build helpers to expose something like an 
+        // 'isEmpty' which we can call here.
+        zone.TryMarkDisposedIfEmpty();
+    }
+
+    private bool PlayerCanAccessZone(BaseZoneDefinition definition, ulong? ownerId) => definition switch
+    {
+        WorldZoneDefinition => true,
+        CombatZoneDefinition => ownerId is not null,
+        HousingZoneDefinition housing => ownerId is not null && PlayerOwnsHouse(ownerId.Value, housing.Id),
+        _ => false
+    };
+
+    private bool PlayerOwnsHouse(ulong ownerId, int zoneDefinitionId)
+    {
+        // NOTE: I'm not sure I like this function living here...
+        // maybe just throw this DB logic into the 'PlayerCanAccessZone' funciton in
+        // the first place..? Idk
+
+        // TODO: fetch from DB
 
         // using var dbContext = _dbContextFactory.CreateDbContext();
 
         // var dbHouse = dbContext.Houses.SingleOrDefault(house =>
-        //     house.CharacterId == ownerId && house.ZoneDefinitionId == housingZoneDefinition.Id);
+        //     house.CharacterId == ownerId && house.ZoneDefinitionId == zoneDefinitionId);
 
         // if (dbHouse is null)
         //     return false;
-
-        zone = new HousingZone(housingZoneDefinition, _serviceProvider)
-        {
-            Id = NextID(),
-            OwnerId = ownerId
-        };
 
         return true;
     }
